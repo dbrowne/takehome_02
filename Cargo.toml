@@ -1,0 +1,8 @@
+[package]
+name = "kv-log"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = "1"
+trait-variant = "0.1.2"
