@@ -180,17 +180,80 @@ mod tests {
     let rt = Runtime::new().unwrap();
     let temp_file = NamedTempFile::new().unwrap();
     let path = temp_file.path().to_str().unwrap();
-    let test_key_1 = "key_one".to_string();
-    let test_val_1 = "Test Value 1".to_string();
+    let test_key_1 = "key_one";
+    let test_key_2 = "Second key";
+    let test_val_1 = "Test Value 1";
+    let test_val_2 = "something completely different";
+    let test_key_3 = "third key";
+    let test_key_4 = "Four";
+    let test_val_3 = "Lorem";
+    let test_val_4 = "ipsum";
 
     rt.block_on(async {
       let kv: KVLog<String, String> = KVLog::load(path);
 
       // Test set and get
-      let old_val = KVStore::set(&kv, test_key_1, test_val_1).await;
+      let old_val = KVStore::set(&kv, test_key_1.to_string(), test_val_1.to_string()).await;
       assert_eq!(old_val, None);
+
+      let val = KVStore::get(&kv, test_key_1.to_string()).await;
+
+      assert_eq!(val, Some(test_val_1.to_string()));
+
+      // Test overriteing values
+
+      let old_val = KVStore::set(&kv, test_key_1.to_string(), test_val_2.to_string()).await;
+      assert_eq!(old_val, Some(test_val_1.to_string()));
+
+      let val = KVStore::get(&kv, test_key_1.to_string()).await;
+      assert_eq!(val, Some(test_val_2.to_string()));
+
+      // Test deletion
+      KVStore::delete(&kv, test_key_1.to_string()).await;
+      let val = KVStore::get(&kv, test_key_1.to_string()).await;
+      assert_eq!(val, None);
+
+      // Sanity check:  confirm we can work with multiple keys and values
+
+      let _ = KVStore::set(&kv, test_key_1.to_string(), test_val_1.to_string()).await;
+      let _ = KVStore::set(&kv, test_key_2.to_string(), test_val_2.to_string()).await;
+      let _ = KVStore::set(&kv, test_key_3.to_string(), test_val_3.to_string()).await;
+      let _ = KVStore::set(&kv, test_key_4.to_string(), test_val_4.to_string()).await;
+
+      let val = KVStore::get(&kv, test_key_3.to_string()).await;
+      assert_eq!(val, Some(test_val_3.to_string()));
+      let val = KVStore::get(&kv, test_key_2.to_string()).await;
+      assert_ne!(val, Some(test_key_4.to_string()));
     });
   }
   #[test]
-  fn test_rude_restart() {}
+  fn test_rude_restart() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path().to_str().unwrap();
+
+    // 1st time write some data
+    {
+      let rt = Runtime::new().unwrap();
+      rt.block_on(async {
+        let kv: KVLog<String, i32> = KVLog::load(path);
+        KVStore::set(&kv, "a".to_string(), 1).await;
+        KVStore::set(&kv, "b".to_string(), 2).await;
+        KVStore::set(&kv, "c".to_string(), 3).await;
+        KVStore::delete(&kv, "b".to_string()).await;
+        KVStore::set(&kv, "a".to_string(), 10).await;
+      });
+      // let the runtime get dropped so it is a rude shutdown
+    }
+    // Second session: verify data persisted correctly
+    {
+      let rt = Runtime::new().unwrap();
+      rt.block_on(async {
+        let kv: KVLog<String, i32> = KVLog::load(path);
+
+        assert_eq!(KVStore::get(&kv, "a".to_string()).await, Some(10));
+        assert_eq!(KVStore::get(&kv, "b".to_string()).await, None);
+        assert_eq!(KVStore::get(&kv, "c".to_string()).await, Some(3));
+      });
+    }
+  }
 }
