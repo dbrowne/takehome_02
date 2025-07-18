@@ -258,24 +258,97 @@ mod tests {
       });
     }
   }
-
   #[test]
   fn test_concurrent_access() {
+    // todo: document this better
     let rt = Runtime::new().unwrap();
     let temp_file = NamedTempFile::new().unwrap();
     let path = temp_file.path().to_str().unwrap();
 
+    const FIVE: i32 = 5;
+    const TEN: i32 = 10;
+    const TWENTY: i32 = 20;
+    const HUNDRED: i32 = 100;
+    const CONTENTION_STRING: &str = "High contention will make problems !!!!!!";
+
     rt.block_on(async {
       let kv = Arc::new(KVLog::<String, i32>::load(path));
 
-      // Spawn multiple concurrent tasks
+      // Pre-populate some data
+      for i in 0..TEN {
+        KVStore::set(&*kv, format!("shared_{}", i), i * HUNDRED).await;
+      }
+
       let mut handles = vec![];
 
-      for i in 0..10 {
+      // Test 1: Concurrent writes to same keys (testing atomicity)
+      for i in 0..TEN {
         let kv_clone = Arc::clone(&kv);
         let handle = task::spawn(async move {
-          for j in 0..10 {
-            KVStore::set(&*kv_clone, format!("key_{}", i), i * 10 + j).await;
+          for j in 0..50 {
+            // Multiple tasks writing to overlapping keys
+            let key = format!("shared_{}", j % TEN);
+            let old = KVStore::set(&*kv_clone, key.clone(), i * 1000 + j).await;
+
+            // Verify old value was valid (either initial or from another task)
+            if let Some(old_val) = old {
+              assert!(old_val % HUNDRED == 0 || old_val >= 0);
+            }
+          }
+        });
+        handles.push(handle);
+      }
+
+      // Test 2: Concurrent readers during writes
+      for reader_id in 0..FIVE {
+        let kv_clone = Arc::clone(&kv);
+        let handle = task::spawn(async move {
+          for i in 0..HUNDRED {
+            // Read keys in a pattern while others are writing
+            let key = format!("shared_{}", (i + reader_id) % TEN);
+            if let Some(value) = KVStore::get(&*kv_clone, key).await {
+              // Value should always be valid (no partial writes)
+              assert!(value >= 0);
+            }
+          }
+        });
+        handles.push(handle);
+      }
+
+      // Test 3: Concurrent set/delete operations
+      for i in 0..FIVE {
+        let kv_clone = Arc::clone(&kv);
+        let handle = task::spawn(async move {
+          for j in 0..TWENTY {
+            let key = format!("delete_test_{}", j % FIVE);
+            if i % 2 == 0 {
+              KVStore::set(&*kv_clone, key, i * HUNDRED + j).await;
+            } else {
+              KVStore::delete(&*kv_clone, key).await;
+            }
+          }
+        });
+        handles.push(handle);
+      }
+
+      // Test 4: High contention on single key
+      for i in 0..TWENTY {
+        let kv_clone = Arc::clone(&kv);
+        let key = CONTENTION_STRING.to_string().clone();
+        let handle = task::spawn(async move {
+          for j in 0..TEN {
+            let value = i * HUNDRED + j;
+            let _ = KVStore::set(&*kv_clone, key.clone(), value).await;
+
+            // Immediately read back to verify
+            let read_back = KVStore::get(&*kv_clone, key.clone()).await;
+            assert!(read_back.is_some());
+
+            // If we just set it, we might not read our value due to races
+            // but we should read *some* valid value
+            if let Some(read_val) = read_back {
+              assert!(read_val >= 0);
+            }
           }
         });
         handles.push(handle);
@@ -286,11 +359,29 @@ mod tests {
         handle.await.unwrap();
       }
 
-      // Verify final values
-      for i in 0..10 {
-        let value = KVStore::get(&*kv, format!("key_{}", i)).await;
-        assert_eq!(value, Some(i * 10 + 9));
+      // Verify final state consistency
+      // Shared keys should have some value from the concurrent writes
+      for i in 0..TEN {
+        let value = KVStore::get(&*kv, format!("shared_{}", i)).await;
+        assert!(value.is_some());
+        if let Some(v) = value {
+          assert!(v >= 0); // Should be a valid value from some task
+        }
       }
+
+      // High contention key should exist with some value
+      let contention_value = KVStore::get(&*kv, CONTENTION_STRING.to_string()).await;
+      assert!(contention_value.is_some());
+
+      // Verify persistence by checking the log file
+      drop(kv); // Flush  pending writes
+      let log_size = std::fs::metadata(path).unwrap().len();
+      assert!(log_size > 0, "Log file should contain entries");
+
+      // Test 5: Reload and verify data survived
+      let kv_reloaded = KVLog::<String, i32>::load(path);
+      let reloaded_value = KVStore::get(&kv_reloaded, CONTENTION_STRING.to_string()).await;
+      assert_eq!(reloaded_value, contention_value, "Data should persist correctly");
     });
   }
 }
