@@ -138,10 +138,10 @@ where
     // Write to log first (WAL)
     let entry = LogEntry::Set { key, value: value.clone() };
 
-    if self.append_to_log(&entry).await.is_err() {
+    if let Err(e) = self.append_to_log(&entry).await {
+      eprintln!("[KVLog] Failed to persist set operation for key - {}: {}", key_str, e);
       return None;
     }
-
     // Then update in-memory store
     let mut store = self.store.write().ok()?;
     store.insert(key_str, value)

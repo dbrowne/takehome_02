@@ -35,7 +35,8 @@ Please include the following:
 - **Multi-threaded executor**: ✅ `test_multi_threaded_executor`
 - **Additional tests**: ✅ `test_persistence_verification`, `test_reentrancy`
 
-
+## ✅ Code Coverage (not required) - 100% Function coverage 96% Line Coverage
+-  llvm version 19.1.7-rust-1.86.0-stable
 
 ## ❌ Documentation Requirements - NOT FULFILLED
 
