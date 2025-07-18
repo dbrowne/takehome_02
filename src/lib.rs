@@ -265,29 +265,30 @@ mod tests {
     let temp_file = NamedTempFile::new().unwrap();
     let path = temp_file.path().to_str().unwrap();
 
-    const FIVE: i32 = 5;
-    const TEN: i32 = 10;
     const TWENTY: i32 = 20;
     const HUNDRED: i32 = 100;
     const CONTENTION_STRING: &str = "High contention will make problems !!!!!!";
+
+    const DATA_ELEMENTS: i32 = 17;
+    const TREAD_SPAWN_COUNT: i32 = 9;
 
     rt.block_on(async {
       let kv = Arc::new(KVLog::<String, i32>::load(path));
 
       // Pre-populate some data
-      for i in 0..TEN {
+      for i in 0..DATA_ELEMENTS {
         KVStore::set(&*kv, format!("shared_{}", i), i * HUNDRED).await;
       }
 
       let mut handles = vec![];
 
       // Test 1: Concurrent writes to same keys (testing atomicity)
-      for i in 0..TEN {
+      for i in 0..DATA_ELEMENTS {
         let kv_clone = Arc::clone(&kv);
         let handle = task::spawn(async move {
           for j in 0..50 {
             // Multiple tasks writing to overlapping keys
-            let key = format!("shared_{}", j % TEN);
+            let key = format!("shared_{}", j % DATA_ELEMENTS);
             let old = KVStore::set(&*kv_clone, key.clone(), i * 1000 + j).await;
 
             // Verify old value was valid (either initial or from another task)
@@ -300,12 +301,12 @@ mod tests {
       }
 
       // Test 2: Concurrent readers during writes
-      for reader_id in 0..FIVE {
+      for reader_id in 0..TREAD_SPAWN_COUNT {
         let kv_clone = Arc::clone(&kv);
         let handle = task::spawn(async move {
           for i in 0..HUNDRED {
             // Read keys in a pattern while others are writing
-            let key = format!("shared_{}", (i + reader_id) % TEN);
+            let key = format!("shared_{}", (i + reader_id) % DATA_ELEMENTS);
             if let Some(value) = KVStore::get(&*kv_clone, key).await {
               // Value should always be valid (no partial writes)
               assert!(value >= 0);
@@ -316,11 +317,11 @@ mod tests {
       }
 
       // Test 3: Concurrent set/delete operations
-      for i in 0..FIVE {
+      for i in 0..TREAD_SPAWN_COUNT {
         let kv_clone = Arc::clone(&kv);
         let handle = task::spawn(async move {
           for j in 0..TWENTY {
-            let key = format!("delete_test_{}", j % FIVE);
+            let key = format!("delete_test_{}", j % TREAD_SPAWN_COUNT);
             if i % 2 == 0 {
               KVStore::set(&*kv_clone, key, i * HUNDRED + j).await;
             } else {
@@ -336,7 +337,7 @@ mod tests {
         let kv_clone = Arc::clone(&kv);
         let key = CONTENTION_STRING.to_string().clone();
         let handle = task::spawn(async move {
-          for j in 0..TEN {
+          for j in 0..10 {
             let value = i * HUNDRED + j;
             let _ = KVStore::set(&*kv_clone, key.clone(), value).await;
 
@@ -361,7 +362,7 @@ mod tests {
 
       // Verify final state consistency
       // Shared keys should have some value from the concurrent writes
-      for i in 0..TEN {
+      for i in 0..DATA_ELEMENTS {
         let value = KVStore::get(&*kv, format!("shared_{}", i)).await;
         assert!(value.is_some());
         if let Some(v) = value {
@@ -382,6 +383,61 @@ mod tests {
       let kv_reloaded = KVLog::<String, i32>::load(path);
       let reloaded_value = KVStore::get(&kv_reloaded, CONTENTION_STRING.to_string()).await;
       assert_eq!(reloaded_value, contention_value, "Data should persist correctly");
+    });
+  }
+
+  #[test]
+  fn test_multi_threaded_executor() {
+    use std::thread;
+    const THREAD_COUNT: i32 = 16;
+    const ITERATION_COUNT: i32 = 50;
+
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path().to_str().unwrap().to_string();
+
+    // Create multi-threaded runtime
+    let rt =
+      tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().unwrap();
+
+    let kv = Arc::new(KVLog::<String, String>::load(&path));
+
+    // Spawn threads that will use the runtime
+    let mut thread_handles = vec![];
+
+    for i in 0..THREAD_COUNT {
+      let kv_clone = Arc::clone(&kv);
+      let rt_handle = rt.handle().clone();
+
+      let handle = thread::spawn(move || {
+        rt_handle.block_on(async {
+          for j in 0..ITERATION_COUNT {
+            let key = format!("thread_{}_key_{}", i, j);
+            let value = format!("value_{}_{}", i, j);
+            KVStore::set(&*kv_clone, key.clone(), value.clone()).await;
+
+            // Verify immediate consistency
+            let retrieved = KVStore::get(&*kv_clone, key).await;
+            assert_eq!(retrieved, Some(value));
+          }
+        });
+      });
+      thread_handles.push(handle);
+    }
+
+    // Wait for all threads
+    for handle in thread_handles {
+      handle.join().unwrap();
+    }
+
+    // Verify all data is present
+    rt.block_on(async {
+      for i in 0..THREAD_COUNT {
+        for j in 0..ITERATION_COUNT {
+          let key = format!("thread_{}_key_{}", i, j);
+          let expected = format!("value_{}_{}", i, j);
+          assert_eq!(KVStore::get(&*kv, key).await, Some(expected));
+        }
+      }
     });
   }
 }
