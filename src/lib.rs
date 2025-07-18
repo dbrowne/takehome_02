@@ -171,9 +171,26 @@ where
 
 #[cfg(test)]
 mod tests {
+  use super::{KVLog, KVStore};
+  use tempfile::NamedTempFile;
+  use tokio::runtime::Runtime;
 
   #[test]
-  fn test_set_get_delete() {}
+  fn test_set_get_delete() {
+    let rt = Runtime::new().unwrap();
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path().to_str().unwrap();
+    let test_key_1 = "key_one".to_string();
+    let test_val_1 = "Test Value 1".to_string();
+
+    rt.block_on(async {
+      let kv: KVLog<String, String> = KVLog::load(path);
+
+      // Test set and get
+      let old_val = KVStore::set(&kv, test_key_1, test_val_1).await;
+      assert_eq!(old_val, None);
+    });
+  }
   #[test]
   fn test_rude_restart() {}
 }
