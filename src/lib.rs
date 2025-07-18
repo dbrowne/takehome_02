@@ -42,6 +42,15 @@ pub struct KVLog<K, V> {
   pub _value: PhantomData<V>,
 }
 
+//
+//  Data  will be stored in the following example format:
+//{"Set":{"key":"key1","value":"value0"}}
+// {"Set":{"key":"key2","value":"value0"}}
+// {"Delete":{"key":"key2"}}
+// {"Set":{"key":"key1","value":"value1"}}
+// {"Set":{"key":"key2","value":"value1"}}
+//
+
 impl<K, V> KVLog<K, V>
 where
   K: Serialize + DeserializeOwned + Send + Sync,
@@ -438,6 +447,81 @@ mod tests {
           assert_eq!(KVStore::get(&*kv, key).await, Some(expected));
         }
       }
+    });
+  }
+
+  #[test]
+  fn test_persistence_verification() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path().to_str().unwrap();
+
+    let rt = Runtime::new().unwrap();
+    const ITERATION_COUNT: i32 = 800;
+    let test_val = format!("value{}", ITERATION_COUNT - 1);
+
+    rt.block_on(async {
+      let kv: KVLog<String, String> = KVLog::load(path);
+
+      // Perform many operations
+      for i in 0..ITERATION_COUNT {
+        KVStore::set(&kv, "key1".to_string(), format!("value{}", i)).await;
+        KVStore::set(&kv, "key2".to_string(), format!("value{}", i)).await;
+        if i % 10 == 0 {
+          KVStore::delete(&kv, "key2".to_string()).await;
+        }
+      }
+
+      // Delete key2 one final time to ensure it's None
+      KVStore::delete(&kv, "key2".to_string()).await;
+
+      // Verify final state
+      assert_eq!(KVStore::get(&kv, "key1".to_string()).await, Some(test_val));
+      assert_eq!(KVStore::get(&kv, "key2".to_string()).await, None);
+    });
+
+    // Verify log file exists and contains entries
+    let log_size = std::fs::metadata(path).unwrap().len();
+    assert!(log_size > 0);
+  }
+
+  #[test]
+  fn test_reentrancy() {
+    let rt = Runtime::new().unwrap();
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path().to_str().unwrap();
+
+    const VALUE1: &str = "FIRST_VALULE";
+    const VALUE2: &str = "SECOMND VALUE";
+    const INNER: &str = "inner_Thread";
+    const OUTER: &str = "Outer Thread";
+
+    rt.block_on(async {
+      let kv = Arc::new(KVLog::<String, String>::load(path));
+
+      // Test reentrancy - calling KV operations from within async context
+      let kv_clone = Arc::clone(&kv);
+      let handle = task::spawn(async move {
+        KVStore::set(&*kv_clone, OUTER.to_string(), VALUE1.to_string()).await;
+
+        // Nested task that also uses the KV store
+        let kv_inner = Arc::clone(&kv_clone);
+        let inner_handle = task::spawn(async move {
+          KVStore::set(&*kv_inner, INNER.to_string(), VALUE2.to_string()).await;
+          KVStore::get(&*kv_inner, OUTER.to_string()).await
+        });
+
+        let outer_value = inner_handle.await.unwrap();
+        assert_eq!(outer_value, Some(VALUE1.to_string()));
+
+        KVStore::get(&*kv_clone, INNER.to_string()).await
+      });
+
+      let inner_value = handle.await.unwrap();
+      assert_eq!(inner_value, Some(VALUE2.to_string()));
+
+      // Verify both values are present
+      assert_eq!(KVStore::get(&*kv, OUTER.to_string()).await, Some(VALUE1.to_string()));
+      assert_eq!(KVStore::get(&*kv, INNER.to_string()).await, Some(VALUE2.to_string()));
     });
   }
 }
