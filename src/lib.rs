@@ -172,8 +172,10 @@ where
 #[cfg(test)]
 mod tests {
   use super::{KVLog, KVStore};
+  use std::sync::Arc;
   use tempfile::NamedTempFile;
   use tokio::runtime::Runtime;
+  use tokio::task;
 
   #[test]
   fn test_set_get_delete() {
@@ -255,5 +257,40 @@ mod tests {
         assert_eq!(KVStore::get(&kv, "c".to_string()).await, Some(3));
       });
     }
+  }
+
+  #[test]
+  fn test_concurrent_access() {
+    let rt = Runtime::new().unwrap();
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path().to_str().unwrap();
+
+    rt.block_on(async {
+      let kv = Arc::new(KVLog::<String, i32>::load(path));
+
+      // Spawn multiple concurrent tasks
+      let mut handles = vec![];
+
+      for i in 0..10 {
+        let kv_clone = Arc::clone(&kv);
+        let handle = task::spawn(async move {
+          for j in 0..10 {
+            KVStore::set(&*kv_clone, format!("key_{}", i), i * 10 + j).await;
+          }
+        });
+        handles.push(handle);
+      }
+
+      // Wait for all tasks to complete
+      for handle in handles {
+        handle.await.unwrap();
+      }
+
+      // Verify final values
+      for i in 0..10 {
+        let value = KVStore::get(&*kv, format!("key_{}", i)).await;
+        assert_eq!(value, Some(i * 10 + 9));
+      }
+    });
   }
 }
