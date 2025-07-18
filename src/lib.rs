@@ -57,30 +57,26 @@ where
         let reader = BufReader::new(file);
         let mut temp_store = HashMap::new();
 
-        //todo: implement reader.lines().flatten()
-        for line in reader.lines() {
-          if let Ok(line) = line {
-            if line.trim().is_empty() {
-              continue;
-            }
+        for line in reader.lines().flatten() {
+          if line.trim().is_empty() {
+            continue;
+          }
 
-            if let Ok(entry) = serde_json::from_str::<LogEntry<K, V>>(&line) {
-              match entry {
-                LogEntry::Set { key, value } => {
-                  if let Ok(key_str) = serde_json::to_string(&key) {
-                    temp_store.insert(key_str, value);
-                  }
+          if let Ok(entry) = serde_json::from_str::<LogEntry<K, V>>(&line) {
+            match entry {
+              LogEntry::Set { key, value } => {
+                if let Ok(key_str) = serde_json::to_string(&key) {
+                  temp_store.insert(key_str, value);
                 }
-                LogEntry::Delete { key } => {
-                  if let Ok(key_str) = serde_json::to_string(&key) {
-                    temp_store.remove(&key_str);
-                  }
+              }
+              LogEntry::Delete { key } => {
+                if let Ok(key_str) = serde_json::to_string(&key) {
+                  temp_store.remove(&key_str);
                 }
               }
             }
           }
         }
-
         // Update the store with loaded data
         if let Ok(mut store_guard) = store.write() {
           *store_guard = temp_store;
@@ -131,7 +127,7 @@ where
     let key_str = serde_json::to_string(&key).ok()?;
 
     // Write to log first (WAL)
-    let entry = LogEntry::Set { key: key, value: value.clone() };
+    let entry = LogEntry::Set { key, value: value.clone() };
 
     if self.append_to_log(&entry).await.is_err() {
       return None;
