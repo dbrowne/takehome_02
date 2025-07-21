@@ -25,6 +25,27 @@ use std::sync::{Arc, RwLock};
 
 
 // Given the following trait representing a key-value store
+/// The trait_variant macro  presented some problems for me since I never used it
+/// and had to do some reading
+///
+/// I initially thought of the following implementation when I saw the code:
+/// ```ignore
+/// pub trait KVStore<K,V> :Send + Sync{
+///    async fn get(&self, key: K) -> Result<Option<V>,E>
+///    async fn set(&self, key: K, value: V) -> Result<Option<V>,E>;
+///    async fn del(&self, key: K) -> Result<Option<V>,E>;
+///}
+/// ```
+/// The error type E  would be replaced with a concrete Error type Enum  using thiserror::Error
+/// where I would cover I/O and thread related errors
+///
+///
+/// Having the Result returning an option allows for the following:
+/// - OK (Some(Value)) or OK (None): Found value or not found but None is  not an error
+/// - Err(e)  : an error occurred. E.g. serialization, I/O or Lock related
+///
+/// Also having the del function retun the value deleted would make the api consitent across all
+/// functions
 #[trait_variant::make(KVStore: Send)]
 pub trait LocalKVStore<K, V>
 where
@@ -52,15 +73,20 @@ enum LogEntry<K, V> {
 /// - reentrant (when shared across either threads or async tasks)
 /// - backed by a log (filesystem is sufficient for this purpose)
 /// - persistence is guaranteed before access (e.g. Write Ahead Log or equivalent guarantee)
-/// - will load the persisted state on startup
+/// - will load the persisted state on startup: kept it simple
 ///
 /// ## Persistence Strategy
 /// - A simple append-only log file containing JSON-serialized operations
 /// - Each line represents one atomic operation
 /// - Operations are written with `fsync` before updating in-memory state
 /// - For this implementation there are two  tradeoffs:
-///   -- efficiency: logging should be in a binary format to minimize data storage
-///   -- lacking temporal information. No time stamp which can impedede debugging
+///
+///   -- efficiency: logging should be in a binary format to minimize data storage maximize speed
+///
+///   -- lacking temporal information. No time stamp or sequence number which can impedede debugging
+///   -- btw: I don't find binary logs to be a problem as I would just write a decoder for it as
+///      part of the module
+///
 ///
 /// ## Concurrency Model
 /// - `RwLock<HashMap>` allows multiple concurrent readers
@@ -73,11 +99,13 @@ enum LogEntry<K, V> {
 /// - Log is replayed sequentially to rebuild state
 ///
 /// ## Data  will be stored in the following  format:
-// - {"Set":{"key":"key1","value":"value0"}}
-// - {"Delete":{"key":"key2"}}
+/// - {"Set":{"key":"key1","value":"value0"}}
+/// - {"Delete":{"key":"key2"}}
 ///
+/// ## ADDITIONAL DESIGN ISSUES IN THE COMMENTS
 pub struct KVLog<K, V> {
   // In-memory store protected by RwLock for concurrent reads
+  /// Would investigate using DashMap (haven't used it but uses fine grain locking per key)
   store: Arc<RwLock<HashMap<String, V>>>,
   // Mutex for serializing write operations to the log
   log_write_mutex: Arc<tokio::sync::Mutex<()>>,
@@ -98,7 +126,7 @@ where
   /// Invalid entries are silently skipped during recovery.
   ///
   /// # Examples
-  /// ```
+  /// ```ignore
   /// # use kv_log::KVLog;
   /// let kv: KVLog<String, i32> = KVLog::load("/tmp/my_data.log");
   /// ```
@@ -149,6 +177,7 @@ where
   }
 
   // Helper method to append entry to log with fsync
+  // This is performance impacting since we are making a heavy weight system call with every update.
   async fn append_to_log(&self, entry: &LogEntry<K, V>) -> std::io::Result<()> {
     let _guard = self.log_write_mutex.lock().await;
 
@@ -210,13 +239,13 @@ where
   ///
   /// * `Some(value)` - The cloned value if the key exists
   /// * `None` - If the key doesn't exist or any error occurs:
-  ///   - Key serialization fails (rare for well-formed types)
-  ///   - Lock is poisoned (after a panic in another thread)
+  ///   - ## PROBLEM: Key serialization fails (rare for well-formed types)
+  ///   - ## PROBLEM:  Lock is poisoned (after a panic in another thread)
   ///
   /// # Note
   ///
-  /// Read operations are not logged as they don't mutate state. In a production
-  /// system, you might want to log reads for audit trails or access patterns.
+  /// Get operations are not logged as they don't mutate state.
+  /// Would log reads in a prod module
   async fn get(&self, key: K) -> Option<V> {
     let key_str = serde_json::to_string(&key).ok()?;
 
@@ -252,6 +281,8 @@ where
   /// Errors are logged to stderr but the operation returns `None` to maintain
   /// the trait interface. This is a limitation - I would use `Result` in a production
   /// interface
+  ///
+  /// ## NOTE!!  Should be returing 'Result'  see earlier comments
   async fn set(&self, key: K, value: V) -> Option<V> {
     let key_str = serde_json::to_string(&key).ok()?;
 
@@ -260,8 +291,12 @@ where
 
     if let Err(e) = self.append_to_log(&entry).await {
       eprintln!("[KVLog] Failed to persist set operation for key - {}: {}", key_str, e);
-      return None;
+      return None; // this is problematic without returning a Result<E>.
     }
+    // This could be problematic since a Thread could be reading the store for this value
+    // before it has been persisted and an old value has been read
+
+
     // Then update in-memory store
     let mut store = self.store.write().ok()?;
     store.insert(key_str, value)
@@ -284,7 +319,7 @@ where
   ///
   /// # Error Handling::  NOTE!!!! THIS IS PROBLEMATIC!
   /// ## Errors are silently ignored since since it does not return a value!!
-  /// Would re write this to return a 'Result' since delete does not provide any indication of success
+  /// ## See earlier comments
   ///
   async fn delete(&self, key: K) {
     let key_str = match serde_json::to_string(&key) {
@@ -308,7 +343,8 @@ where
 
 
 #[cfg(test)]
-/// Tests the fundamental CRUD operations of the KVLog implementation. (AI generated doc)
+/// (These doc comments were AI generated)
+/// Tests the fundamental CRUD operations of the KVLog implementation.
 ///
 /// This test validates the core functionality of the key-value store:
 /// 1. **Create**: Setting new key-value pairs
@@ -397,7 +433,8 @@ mod tests {
     });
   }
 
-  /// Tests crash recovery and persistence guarantees after an unexpected shutdown. (AI generated doc)
+  /// (These comments were AI generated)
+  /// Tests crash recovery and persistence guarantees after an unexpected shutdown.
   ///
   /// This test simulates a "rude" (ungraceful) shutdown where the process terminates
   /// without proper cleanup - similar to a power failure, kill -9, or panic. It validates
@@ -475,7 +512,8 @@ mod tests {
     }
   }
 
-  /// Tests thread safety and concurrent access patterns under high contention. (AI gened doc)
+  /// (These comments were AI generated)
+  /// Tests thread safety and concurrent access patterns under high contention.
   ///
   /// This is a comprehensive stress test that validates the KVLog implementation's
   /// ability to handle multiple concurrent operations without data corruption,
@@ -522,7 +560,7 @@ mod tests {
     let temp_file = NamedTempFile::new().unwrap();
     let path = temp_file.path().to_str().unwrap();
 
-    const TWENTY: i32 = 20;
+    const TWENTY: i32 = 20;// if a numeric constant is used multiple times I name it for easier search/repl
     const HUNDRED: i32 = 100;
     const CONTENTION_STRING: &str = "High contention will make problems !!!!!!";
 
@@ -849,7 +887,7 @@ mod tests {
   /// # Test Architecture
   ///
   /// The test creates a nested task hierarchy:
-  /// ```
+  /// ```ignore
   /// Main Task
   ///   └── Outer Task (writes OUTER key)
   ///         └── Inner Task (writes INNER key, reads OUTER key)
